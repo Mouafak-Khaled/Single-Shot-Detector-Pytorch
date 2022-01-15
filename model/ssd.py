@@ -8,7 +8,7 @@ DEFAULT_IMAGE_SIZE = 300
 
 
 # A pretrained model trained with ImageNet:
-base_model = models.resnet50(pretrained=True)
+base_model = models.resnet18(pretrained=True)
 
 # Removing the Fully Connected Layer from the ResNet:
 # base_model = nn.Sequential(*list(base_model.children())[:-1])
@@ -30,14 +30,14 @@ class Conv(nn.Module):
 
         kernel = 1
         self.conv1 = nn.Conv2d(in_channels=channels[0], out_channels=channels[1], 
-                                kernel_size=kernel, stride=strides[0], pad=paddings[0])
+                                kernel_size=kernel, stride=strides[0], padding=paddings[0])
 
         kernel = 3
         self.conv2 = nn.Conv2d(in_channels=channels[1], out_channels=channels[2], 
-                                kernel_size=kernel, stride=strides[1], pad=paddings[1])
+                                kernel_size=kernel, stride=strides[1], padding=paddings[1])
 
-        torch.nn.init.kaiming_uniform(self.conv1.weight)
-        torch.nn.init.kaiming_uniform(self.conv2.weight)
+        torch.nn.init.kaiming_uniform_(self.conv1.weight)
+        torch.nn.init.kaiming_uniform_(self.conv2.weight)
 
     def forward(self, x):
 
@@ -51,38 +51,47 @@ class FeatureNet(nn.Module):
         super(FeatureNet, self).__init__()
 
         modelList = list(base_resnet.children())
-
-        self.feature1 = nn.Sequential(modelList[:5])
-        self.feature2 = nn.Sequential(modelList[:7])
+        
+        self.feature1 = nn.Sequential(*modelList[:6]) # 128 x 38 x 38
+        self.feature2 = nn.Sequential(modelList[7]) # 256 x 19 x 19
 
         channels = [256, 256, 512]
         paddings = [0, 1]
         strides = [1, 2]
 
-        self.feature3 = Conv(channels=channels , paddings=paddings , strides=strides)
+        self.feature3 = Conv(channels=channels , paddings=paddings , strides=strides) # 512 x 10 x 10
 
         channels = [512, 128, 256]
         paddings = [0, 1]
         strides = [1, 2]
 
-        self.feature4 = Conv(channels=channels , paddings=paddings , strides=strides)
+        self.feature4 = Conv(channels=channels , paddings=paddings , strides=strides) # 256 x 5 x 5
 
         channels = [256, 128, 256]
         paddings = [0, 0]
         strides = [1, 1]
 
-        self.feature5 = Conv(channels=channels , paddings=paddings , strides=strides)
+        self.feature5 = Conv(channels=channels , paddings=paddings , strides=strides) # 256 x 3 x 3
 
         channels = [256, 128, 256]
         paddings = [0, 0]
         strides = [1, 1]
 
-        self.feature6 = Conv(channels=channels , paddings=paddings , strides=strides)
+        self.feature6 = Conv(channels=channels , paddings=paddings , strides=strides) # 256 x 1 x 1
         
         self.features = [self.feature1, self.feature2, self.feature3, self.feature4, self.feature5, self.feature6] 
 
     def forward(self, x):
-        return [feature(x) for feature in self.features]
+        f1 = self.feature1(x)
+        f2 = self.feature2(f1)
+
+        f3 = self.feature2(f2)
+        f4 = self.feature2(f3)
+
+        f5 = self.feature2(f4)
+        f6 = self.feature2(f5)
+
+        return [f1, f2, f3, f4, f5, f6]
 
 
 class PredConv(nn.Module):
@@ -94,13 +103,13 @@ class PredConv(nn.Module):
         kernel, pad = 3, 1
         
         self.loc_conv = nn.Conv2d(in_channels=channel_in, out_channels=loc_channel_out, 
-                                kernel_size=kernel, pad=pad)
+                                kernel_size=kernel, padding=pad)
 
         self.pred_conv = nn.Conv2d(in_channels=channel_in, out_channels=pre_channel_out, 
-                                kernel_size=kernel, pad=pad)
+                                kernel_size=kernel, padding=pad)
 
-        torch.nn.init.kaiming_uniform(self.loc_conv.weight)
-        torch.nn.init.kaiming_uniform(self.pred_conv.weight)
+        torch.nn.init.kaiming_uniform_(self.loc_conv.weight)
+        torch.nn.init.kaiming_uniform_(self.pred_conv.weight)
 
     def forward(self, x):
         feature_out = self.feature(x)
@@ -142,4 +151,29 @@ class PredConvNet(nn.Module):
 
 def main():
 
-    pass
+    channels_in = [128, 252, 512, 256, 256, 256]
+
+    priors = [4, 7, 6, 7, 4, 4]
+
+    NUM_OF_CLASSES = 91
+
+    loc_channel_out = [4 * prior for prior in priors]
+    pred_channel_out = [NUM_OF_CLASSES * prior for prior in priors]
+
+    feature_net = FeatureNet(base_model)
+
+    features = feature_net.features
+    x = torch.randn((1, 3, 300, 300))   
+    for f in features[:2]:
+        print(f(x).size())
+
+    # pred_convnet = PredConvNet(channels_in, loc_channel_out, pred_channel_out, features)
+
+    # x = torch.randn((1, 3, 300, 300))
+
+    # yhat = pred_convnet(x)
+    
+    # # print(len(yhat))
+    # print(yhat)
+if __name__ == "__main__":
+    main()

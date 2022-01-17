@@ -132,18 +132,16 @@ class PredConvNet(nn.Module):
     def __init__(self, channel_in, loc_channel_out, pred_channel_out, features):
         super(PredConvNet, self).__init__()
 
-        # Initialize Priors here?
+        self.pred_convs = nn.ModuleList()
 
-        self.pred_convs = []
         for i in range(len(features)):
             self.pred_convs.append(PredConv(
                 channel_in[i], loc_channel_out[i], pred_channel_out[i], features[i]))
 
-        
     def forward(self, x):
         loc_v = torch.empty(0, 4)
         conf_v = torch.empty(0, NUM_OF_CLASSES)
-        
+
         out_conv = [pred_conv(x) for pred_conv in self.pred_convs]
 
         for loc_out, conf_out in out_conv:
@@ -151,140 +149,94 @@ class PredConvNet(nn.Module):
             conf_v = torch.vstack((conf_v, conf_out.view(-1, NUM_OF_CLASSES)))
         return loc_v, conf_v
 
-# loss = nn.CrossEntropyLoss(conf)
-# loss.item()
-
-# loss2 = nn.Smooth(loc)
-# loss2.item()
-
-# general_loss = loss + loss2
-
-# general_loss.backward()
-
-# optimizer.step()
 
 class MultiboxLoss(nn.Module):
-    def __init__(self, threshold=0.5):
+    def __init__(self, threshold=0.5, alpha=1):
         super(MultiboxLoss, self).__init__()
 
-        self.smooth_l1 = nn.SmoothL1Loss() # For bboxes
-        self.cross_entropy = nn.CrossEntropyLoss() # For confs
+        self.smooth_l1 = nn.SmoothL1Loss()  # For bboxes
+        self.cross_entropy = nn.CrossEntropyLoss()  # For confs
+        self.alpha = alpha
 
         self.threshold = threshold
 
-    def forward(self, gt_locs, gt_class, pred_locs, pred_confs):
+    def forward(self, gt_locs, pred_locs, gt_ids, pred_confs):
+        # --- Localization loss: -----------------------------------------------------
 
-        # --- Localization loss: -----------------------------------------------------    
-
-        LEFT, TOP, W, H = pred_locs[:, 0], pred_locs[:, 1], pred_locs[:, 2], pred_locs[:, 3]
+        LEFT, TOP, W, H = pred_locs[:, 0], pred_locs[:,
+                                                     1], pred_locs[:, 2], pred_locs[:, 3]
         BOTTOM = LEFT + W
         RIGHT = TOP + H
 
         intersection = torch.empty((pred_locs.size()[0], 0))
 
         for gt_loc in gt_locs:
-            
+
             gt_left, gt_top, w, h = gt_loc
             gt_right = gt_top + h
-            gt_bottom =  gt_left + w
+            gt_bottom = gt_left + w
 
-            x_overlap = torch.maximum(0.0, torch.minimum(RIGHT, gt_right) - torch.maximum(LEFT, gt_left))
-            y_overlap = torch.maximum(0.0, torch.minimum(BOTTOM, gt_bottom) - torch.maximum(TOP, gt_top))
+            x_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(
+                RIGHT, gt_right) - torch.maximum(LEFT, gt_left))
+            y_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(
+                BOTTOM, gt_bottom) - torch.maximum(TOP, gt_top))
             intersection_area = x_overlap * y_overlap
-            
-            intersection = torch.hstack((intersection, intersection_area.reshape(-1, 1)))
-        
-        intersection = intersection > self.threshold
 
-        num_positives = torch.sum(intersection)
+            intersection = torch.hstack(
+                (intersection, intersection_area.reshape(-1, 1)))
 
-        
+        intersection_mask = intersection > self.threshold
+        positives_mask = torch.any(intersection_mask, dim=1)
 
-        loss_loc = (1 / num_positives) * torch.sum(self.smooth_l1(pred_locs, gt_locs))
+        positives = torch.sum(positives_mask)
 
+        num_positives = positives.item()
 
-        # limit the number of negative matches that will be evaluated in the loss function.
+        intersection = intersection * intersection_mask
+        intersection_indecies = intersection.argmax(1)
 
-        # Well, why not use the ones that the model was most wrong about?
+        positive_preds = pred_locs[positives_mask]
 
-        # only use those predictions where the model found it hardest to recognize that 
-        # there are no objects. This is called Hard Negative Mining.
-        positives = 5
+        positive_gts = gt_locs[intersection_indecies][positives_mask]
 
-        hard_negatives = 3 * positives
+        positive_grads = torch.empty(positive_preds.size())
 
-        loss_conf = self.cross_entropy(pred_confs, gt_class)
+        positive_grads[:, 0] = (positive_gts[:, 0] -
+                                positive_preds[:, 0]) / positive_preds[:, 2]
+        positive_grads[:, 1] = (positive_gts[:, 1] -
+                                positive_preds[:, 1]) / positive_preds[:, 3]
+        positive_grads[:, 2] = torch.log(
+            positive_gts[:, 2] / positive_preds[:, 2])
+        positive_grads[:, 3] = torch.log(
+            positive_gts[:, 3] / positive_preds[:, 3])
 
-def loss(gt_locs, pred_locs, gt_ids, gt_class, pred_confs):
-    # TODO: Change to 0.5
-    threshold = 0.05
+        loss_loc = self.smooth_l1(positive_grads, positive_gts) / num_positives
 
-    # --- Localization loss: -----------------------------------------------------
+        # --- Confidence loss: -----------------------------------------------------
+        # scores of positive priors
+        positive_confs = pred_confs[positives_mask]
+        positive_gt_ids = gt_ids[positives_mask]
 
-    LEFT, TOP, W, H = pred_locs[:, 0], pred_locs[:, 1], pred_locs[:, 2], pred_locs[:, 3]
-    BOTTOM = LEFT + W
-    RIGHT = TOP + H
+        # scores of (some) negative priors
+        num_hard_negatives = 3 * num_positives
 
-    intersection = torch.empty((pred_locs.size()[0], 0))
+        intersection_sums = torch.sum(intersection, 1)
 
-    for gt_loc in gt_locs:
-        
-        gt_left, gt_top, w, h = gt_loc
-        gt_right = gt_top + h
-        gt_bottom =  gt_left + w
+        negative_threshold = torch.sort(intersection_sums)[:num_hard_negatives]
 
-        x_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(RIGHT, gt_right) - torch.maximum(LEFT, gt_left))
-        y_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(BOTTOM, gt_bottom) - torch.maximum(TOP, gt_top))
-        intersection_area = x_overlap * y_overlap
-        
-        intersection = torch.hstack((intersection, intersection_area.reshape(-1, 1)))
-    
-    intersection_mask = intersection > threshold
-    positives_mask = torch.any(intersection_mask, dim=1)
-    positives = torch.sum(positives_mask)
-    
-    num_positives = positives.item()
+        intersection_sums_mask = intersection_sums <= negative_threshold[0]
 
-    intersection = intersection * intersection_mask
-    intersection_indecies = intersection.argmax(1)
-    
-    ######################## DELETE LATER #############################
-    prior_to_gt = torch.empty((pred_locs.size()[0], 5))
-  
-    prior_to_gt[:, 0] = gt_ids[intersection_indecies]
-    prior_to_gt[:, 1:] = gt_locs[intersection_indecies]
-    ###################################################################
+        negative_confs = pred_confs[intersection_sums_mask][:num_hard_negatives]
 
-    smooth_l1 = nn.SmoothL1Loss()
-    
-    positive_preds = pred_locs[positives_mask]
+        negative_gt_ids = gt_ids[intersection_sums_mask][:num_hard_negatives]
 
-    positive_gts = gt_locs[intersection_indecies][positives_mask]
+        loss_conf = self.cross_entropy(positive_confs, positive_gt_ids) + \
+            self.cross_entropy(negative_confs, negative_gt_ids)
 
-    positive_grads = torch.empty(positive_preds.size())
+        loss_val = loss_conf + self.alpha * loss_loc
 
-    positive_grads[:, 0] = (positive_gts[:, 0] - positive_preds[:, 0]) / positive_preds[:,2]
-    positive_grads[:, 1] = (positive_gts[:, 1] - positive_preds[:, 1]) / positive_preds[:,3]
-    positive_grads[:, 2] = torch.log(positive_gts[:, 2] / positive_preds[:, 2])
-    positive_grads[:, 3] = torch.log(positive_gts[:, 3] / positive_preds[:, 3]) 
-    
-    loss_loc = 1 / num_positives * smooth_l1(positive_grads, positive_gts)
+        return loss_val
 
-    print(loss_loc.item())
-
-    # --- Confidence loss: -----------------------------------------------------
-    positive_gt_ids = gt_ids[intersection_indecies][positives_mask]
-    # negative_gt_ids = gt_ids[intersection_indecies][positives_mask]
-    num_hard_negatives = 3 * num_positives
-
-    intersection_sums = torch.sum(intersection, 1)
-    negative_threshold = torch.sort(intersection_sums)[:num_hard_negatives]
-    
-    intersection_sums_mask = intersection_sums <= negative_threshold[0]
-
-    hard_negatives = intersection[intersection_sums_mask][:num_hard_negatives]
-
-    print(hard_negatives)
 
 def main():
 
@@ -313,7 +265,7 @@ def main():
     pred_locs = torch.from_numpy(pred_locs)
     gt_locs = torch.from_numpy(gt_locs)
 
-    loss(gt_locs, pred_locs, gt_ids, None, None)
+    pred_confs = torch.randn((25, 5))
 
 
 if __name__ == "__main__":

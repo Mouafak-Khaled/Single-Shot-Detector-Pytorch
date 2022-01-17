@@ -101,19 +101,15 @@ def CustomCocoTransform(image, target, labels):
      - generate a new annotation for the image
      - this new annotation keeps the id, the category_id, and the bbox
     """
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-    new_size = [300, 300]
 
     ToTensor = transforms.ToTensor()
     image = ToTensor(image)
 
     height, width = image.shape[1], image.shape[2]
+    new_size = [300, 300]
+
     Resize = transforms.Resize(new_size)
-
-    compose = transforms.Compose([transforms.Normalize(mean, std), Resize])
-
-    image = compose(image)
+    image = Resize(image)
 
     new_target = []
 

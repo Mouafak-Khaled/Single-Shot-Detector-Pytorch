@@ -170,8 +170,9 @@ class MultiboxLoss(nn.Module):
 
         intersection = torch.empty((pred_locs.size()[0], 0))
 
-        for gt_loc in gt_locs:
+        for gt_loc in gt_locs[0]:
 
+            print(gt_loc)
             gt_left, gt_top, w, h = gt_loc
             gt_right = gt_top + h
             gt_bottom = gt_left + w

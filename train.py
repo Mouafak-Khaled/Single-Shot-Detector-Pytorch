@@ -2,6 +2,8 @@ import torch
 from model import *
 from model.ssd import MultiboxLoss, PredConvNet
 
+TOTAL_PRIORS_NUM = 9128
+
 
 def train(model: PredConvNet, train_loader, validation_loader, optimizer, criterion: MultiboxLoss, epochs, device):
 
@@ -9,6 +11,7 @@ def train(model: PredConvNet, train_loader, validation_loader, optimizer, criter
     total_accuracy = []
 
     model.to(device)
+    b_size = train_loader.batch_size
 
     for epoch in range(epochs):
         batch_loss = 0
@@ -17,7 +20,12 @@ def train(model: PredConvNet, train_loader, validation_loader, optimizer, criter
             optimizer.zero_grad()
             loc_hat, conf_hat = model(images)
 
-            loss = criterion(bboxes, loc_hat, labels, conf_hat)
+            loc_hat = loc_hat.view(b_size, TOTAL_PRIORS_NUM, -1)
+            conf_hat = conf_hat.view(b_size, TOTAL_PRIORS_NUM, -1)
+
+            loss = criterion(loc_hat, conf_hat, bboxes, labels)
+
+            print("loss: ", loss.item())
             batch_loss += loss.item()
             loss.backward()
             optimizer.step()
@@ -35,10 +43,9 @@ def train(model: PredConvNet, train_loader, validation_loader, optimizer, criter
         total_accuracy.append(
             val_acc / (len(validation_loader) * validation_loader.batch_size))
 
-        if(epoch % 5 == 0):
-            print(
-                f"Epoch {epoch} : loss = {total_loss[-1]} - validation accuracy = {total_accuracy[-1]}"
-            )
+        print(
+            f"Epoch {epoch} : loss = {total_loss[-1]} - validation accuracy = {total_accuracy[-1]}"
+        )
 
 
 def get_items(y, item):

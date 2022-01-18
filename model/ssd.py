@@ -1,11 +1,12 @@
-import enum
+from pyexpat import features
 from tkinter import BOTTOM
 import torch
 import torch.nn as nn
-import torchvision
 from torchvision import transforms, models
 from torch import relu
 import numpy as np
+from utils.prior_utils import *
+from utils.priors import *
 
 DEFAULT_IMAGE_SIZE = 300
 NUM_OF_CLASSES = 91
@@ -39,28 +40,43 @@ class Conv(nn.Module):
         self.conv2 = nn.Conv2d(in_channels=channels[1], out_channels=channels[2],
                                kernel_size=kernel, stride=strides[1], padding=paddings[1])
 
-        torch.nn.init.kaiming_uniform_(self.conv1.weight)
-        torch.nn.init.kaiming_uniform_(self.conv2.weight)
+        self.bn1 = nn.BatchNorm2d(channels[1])
+        self.bn2 = nn.BatchNorm2d(channels[2])
+
+        torch.nn.init.xavier_uniform_(self.conv1.weight)
+        torch.nn.init.xavier_uniform_(self.conv2.weight)
+
+        nn.init.constant_(self.conv1.bias, 0.)
+        nn.init.constant_(self.conv2.bias, 0.)
 
     def forward(self, x):
-
-        x = relu(self.conv1(x))
-        x = relu(self.conv2(x))
+        x = self.bn1(relu(self.conv1(x)))
+        x = self.bn2(relu(self.conv2(x)))
 
         return x
 
 
-class FeatureNet():
+class FeatureNet(nn.Module):
     def __init__(self, base_resnet):
+        super(FeatureNet, self).__init__()
 
         modelList = list(base_resnet.children())
 
-        self.feature1 = nn.Sequential(*modelList[:6])  # 128 x 38 x 38
+        self.features = nn.ModuleList()
+
+        self.feature1 = nn.Sequential(
+            *modelList[:6],
+            # nn.BatchNorm2d(128)
+        )  # 128 x 38 x 38
+
+        self.features.append(self.feature1)
 
         self.feature2 = nn.Sequential(
             self.feature1,
-            *modelList[6]
+            *modelList[6],
+            # nn.BatchNorm2d(256)
         )  # 256 x 19 x 19
+        self.features.append(self.feature2)
 
         channels = [256, 256, 512]
         paddings = [0, 1]
@@ -68,8 +84,10 @@ class FeatureNet():
 
         self.feature3 = nn.Sequential(
             self.feature2,
-            Conv(channels=channels, paddings=paddings, strides=strides)
+            Conv(channels=channels, paddings=paddings, strides=strides),
+            # nn.BatchNorm2d(512)
         )  # 512 x 10 x 10
+        self.features.append(self.feature3)
 
         channels = [512, 128, 256]
         paddings = [0, 1]
@@ -77,8 +95,10 @@ class FeatureNet():
 
         self.feature4 = nn.Sequential(
             self.feature3,
-            Conv(channels=channels, paddings=paddings, strides=strides)
+            Conv(channels=channels, paddings=paddings, strides=strides),
+            # nn.BatchNorm2d(256)
         )  # 256 x 5 x 5
+        self.features.append(self.feature4)
 
         channels = [256, 128, 256]
         paddings = [0, 0]
@@ -86,8 +106,10 @@ class FeatureNet():
 
         self.feature5 = nn.Sequential(
             self.feature4,
-            Conv(channels=channels, paddings=paddings, strides=strides)
+            Conv(channels=channels, paddings=paddings, strides=strides),
+            # nn.BatchNorm2d(256)
         )  # 256 x 3 x 3
+        self.features.append(self.feature5)
 
         channels = [256, 128, 256]
         paddings = [0, 0]
@@ -95,12 +117,13 @@ class FeatureNet():
 
         self.feature6 = nn.Sequential(
             self.feature5,
-            Conv(channels=channels, paddings=paddings, strides=strides)
+            Conv(channels=channels, paddings=paddings, strides=strides),
+            # nn.BatchNorm2d(256)
         )  # 256 x 1 x 1
+        self.features.append(self.feature6)
 
-        self.features = [self.feature1, self.feature2,
-                         self.feature3, self.feature4,
-                         self.feature5, self.feature6]
+    def forward(self, x):
+        return [pred_conv(x) for pred_conv in self.features]
 
 
 class PredConv(nn.Module):
@@ -109,34 +132,37 @@ class PredConv(nn.Module):
 
         kernel, pad = 3, 1
 
-        loc_conv_tmp = nn.Conv2d(in_channels=channel_in, out_channels=loc_channel_out,
-                                 kernel_size=kernel, padding=pad)
+        self.feature = feature
 
-        pred_conv_tmp = nn.Conv2d(in_channels=channel_in, out_channels=pred_channel_out,
+        self.loc_conv = nn.Conv2d(in_channels=channel_in, out_channels=loc_channel_out,
                                   kernel_size=kernel, padding=pad)
 
-        torch.nn.init.kaiming_uniform_(loc_conv_tmp.weight)
-        torch.nn.init.kaiming_uniform_(pred_conv_tmp.weight)
+        self.pred_conv = nn.Conv2d(in_channels=channel_in, out_channels=pred_channel_out,
+                                   kernel_size=kernel, padding=pad)
 
-        self.loc_conv = nn.Sequential(feature, loc_conv_tmp)
-        self.pred_conv = nn.Sequential(feature, pred_conv_tmp)
+        nn.init.kaiming_normal_(self.loc_conv.weight)
+        nn.init.constant_(self.loc_conv.bias, 0.)
+
+        nn.init.kaiming_normal_(self.pred_conv.weight)
+        nn.init.constant_(self.pred_conv.bias, 0.)
 
     def forward(self, x):
-        x_loc = self.loc_conv(x)
-        x_pred = self.pred_conv(x)
+        x1 = self.feature(x)
+        x_loc = self.loc_conv(x1)
+        x_pred = self.pred_conv(x1)
 
         return x_loc, x_pred
 
 
 class PredConvNet(nn.Module):
-    def __init__(self, channel_in, loc_channel_out, pred_channel_out, features):
+    def __init__(self, channel_in, loc_channel_out, pred_channel_out, featureNet):
         super(PredConvNet, self).__init__()
 
         self.pred_convs = nn.ModuleList()
 
-        for i in range(len(features)):
-            self.pred_convs.append(PredConv(
-                channel_in[i], loc_channel_out[i], pred_channel_out[i], features[i]))
+        for i, feature in enumerate(featureNet):
+            self.pred_convs.append(
+                PredConv(channel_in[i], loc_channel_out[i], pred_channel_out[i], feature))
 
     def forward(self, x):
         loc_v = torch.empty(0, 4)
@@ -145,97 +171,90 @@ class PredConvNet(nn.Module):
         out_conv = [pred_conv(x) for pred_conv in self.pred_convs]
 
         for loc_out, conf_out in out_conv:
+            print(loc_out.size())
             loc_v = torch.vstack((loc_v, loc_out.view(-1, 4)))
             conf_v = torch.vstack((conf_v, conf_out.view(-1, NUM_OF_CLASSES)))
         return loc_v, conf_v
 
 
 class MultiboxLoss(nn.Module):
-    def __init__(self, threshold=0.5, alpha=1):
+    def __init__(self, n_priors, n_classes, threshold=0.5, alpha=1):
         super(MultiboxLoss, self).__init__()
 
         self.smooth_l1 = nn.SmoothL1Loss()  # For bboxes
-        self.cross_entropy = nn.CrossEntropyLoss()  # For confs
+        self.cross_entropy = nn.CrossEntropyLoss(reduction='none')  # For confs
         self.alpha = alpha
+        self.n_priors = n_priors
+        self.n_classes = n_classes
+        self.priors = create_priors()
+        self.priors_xy = cxcy_to_xy(self.priors)
 
         self.threshold = threshold
 
-    def forward(self, gt_locs, pred_locs, gt_ids, pred_confs):
-        # --- Localization loss: -----------------------------------------------------
+    ####The below unction (forward) is incorperated from the code of https://github.com/sgrvinod########
+    def forward(self, predicted_locs, predicted_scores, boxes, labels):
+        batch_size = predicted_locs.size(0)
+        n_priors = self.n_priors
+        n_classes = self.n_classes
 
-        LEFT, TOP, W, H = pred_locs[:, 0], pred_locs[:,
-                                                     1], pred_locs[:, 2], pred_locs[:, 3]
-        BOTTOM = LEFT + W
-        RIGHT = TOP + H
+        true_locs = torch.zeros((batch_size, n_priors, 4), dtype=torch.float)
+        true_classes = torch.zeros((batch_size, n_priors), dtype=torch.long)
 
-        intersection = torch.empty((pred_locs.size()[0], 0))
+        # For each image
+        for i in range(batch_size):
+            n_objects = boxes[i].size(0)
 
-        for gt_loc in gt_locs:
+            overlap = find_jaccard_overlap(boxes[i],
+                                           self.priors_xy)
 
-            gt_left, gt_top, w, h = gt_loc
-            gt_right = gt_top + h
-            gt_bottom = gt_left + w
+            overlap_for_each_prior, object_for_each_prior = overlap.max(
+                dim=0)
 
-            x_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(
-                RIGHT, gt_right) - torch.maximum(LEFT, gt_left))
-            y_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(
-                BOTTOM, gt_bottom) - torch.maximum(TOP, gt_top))
-            intersection_area = x_overlap * y_overlap
+            _, prior_for_each_object = overlap.max(dim=1)
 
-            intersection = torch.hstack(
-                (intersection, intersection_area.reshape(-1, 1)))
+            object_for_each_prior[prior_for_each_object] = torch.LongTensor(
+                range(n_objects))
 
-        intersection_mask = intersection > self.threshold
-        positives_mask = torch.any(intersection_mask, dim=1)
+            overlap_for_each_prior[prior_for_each_object] = 1.
 
-        positives = torch.sum(positives_mask)
+            label_for_each_prior = labels[i][object_for_each_prior]
+            label_for_each_prior[overlap_for_each_prior <
+                                 self.threshold] = 0
 
-        num_positives = positives.item()
+            true_classes[i] = label_for_each_prior
 
-        intersection = intersection * intersection_mask
-        intersection_indecies = intersection.argmax(1)
+            true_locs[i] = cxcy_to_gcxgcy(xy_to_cxcy(
+                boxes[i][object_for_each_prior]), self.priors)
 
-        positive_preds = pred_locs[positives_mask]
+        positive_priors = true_classes != 0
 
-        positive_gts = gt_locs[intersection_indecies][positives_mask]
+        loc_loss = self.smooth_l1(
+            predicted_locs[positive_priors], true_locs[positive_priors])
 
-        positive_grads = torch.empty(positive_preds.size())
+        n_positives = positive_priors.sum(dim=1)
+        n_hard_negatives = 3 * n_positives
 
-        positive_grads[:, 0] = (positive_gts[:, 0] -
-                                positive_preds[:, 0]) / positive_preds[:, 2]
-        positive_grads[:, 1] = (positive_gts[:, 1] -
-                                positive_preds[:, 1]) / positive_preds[:, 3]
-        positive_grads[:, 2] = torch.log(
-            positive_gts[:, 2] / positive_preds[:, 2])
-        positive_grads[:, 3] = torch.log(
-            positive_gts[:, 3] / positive_preds[:, 3])
+        conf_loss_all = self.cross_entropy(
+            predicted_scores.view(-1, n_classes), true_classes.view(-1))
 
-        loss_loc = self.smooth_l1(positive_grads, positive_gts) / num_positives
+        conf_loss_all = conf_loss_all.view(batch_size, n_priors)
 
-        # --- Confidence loss: -----------------------------------------------------
-        # scores of positive priors
-        positive_confs = pred_confs[positives_mask]
-        positive_gt_ids = gt_ids[positives_mask]
+        conf_loss_pos = conf_loss_all[positive_priors]
 
-        # scores of (some) negative priors
-        num_hard_negatives = 3 * num_positives
+        conf_loss_neg = conf_loss_all.clone()
 
-        intersection_sums = torch.sum(intersection, 1)
+        conf_loss_neg[positive_priors] = 0.
 
-        negative_threshold = torch.sort(intersection_sums)[:num_hard_negatives]
+        conf_loss_neg, _ = conf_loss_neg.sort(dim=1, descending=True)
+        hardness_ranks = torch.LongTensor(range(n_priors)).unsqueeze(
+            0).expand_as(conf_loss_neg)
+        hard_negatives = hardness_ranks < n_hard_negatives.unsqueeze(1)
+        conf_loss_hard_neg = conf_loss_neg[hard_negatives]
 
-        intersection_sums_mask = intersection_sums <= negative_threshold[0]
+        conf_loss = (conf_loss_hard_neg.sum() + conf_loss_pos.sum()
+                     ) / n_positives.sum().float()
 
-        negative_confs = pred_confs[intersection_sums_mask][:num_hard_negatives]
-
-        negative_gt_ids = gt_ids[intersection_sums_mask][:num_hard_negatives]
-
-        loss_conf = self.cross_entropy(positive_confs, positive_gt_ids) + \
-            self.cross_entropy(negative_confs, negative_gt_ids)
-
-        loss_val = loss_conf + self.alpha * loss_loc
-
-        return loss_val
+        return conf_loss + self.alpha * loc_loss
 
 
 def main():

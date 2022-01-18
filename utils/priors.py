@@ -71,6 +71,11 @@ def create_priors():
 
     all_priors = torch.from_numpy(all_priors).clamp(0, 1)
 
+    if torch.cuda.is_available():
+        all_priors.to('cuda:0')
+    else:
+        all_priors.to('cpu')
+
     return all_priors
 
 

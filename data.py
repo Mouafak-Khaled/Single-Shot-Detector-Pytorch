@@ -31,7 +31,7 @@ make sure to download the coco-2017 train and val datasets
 
 class CocoData(Dataset):
 
-    def __init__(self, rootDirectory: str,  annFile: str, labels_path, device, split='train', transform=None):
+    def __init__(self, rootDirectory: str,  annFile: str, labels_path, device=None, split='train', transform=None):
 
         super(CocoData, self).__init__()
 
@@ -88,7 +88,7 @@ class CocoData(Dataset):
             bboxes.append(b[1])
             labels.append(b[2])
 
-        images = torch.stack(images, dim=0)
+        images = torch.stack(images, dim=0).to(self.device)
 
         return images, bboxes, labels
 

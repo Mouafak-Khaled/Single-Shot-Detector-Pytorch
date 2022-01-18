@@ -11,6 +11,11 @@ from utils.priors import *
 DEFAULT_IMAGE_SIZE = 300
 NUM_OF_CLASSES = 91
 
+if torch.cuda.is_available():
+    device = torch.device('cuda:0')
+else:
+    device = torch.device('cpu')
+
 # A pretrained model trained with ImageNet:
 base_model = models.resnet18(pretrained=True)
 
@@ -19,13 +24,6 @@ base_model = models.resnet18(pretrained=True)
 
 # Removing the Fully Connected Layer from the ResNet:
 base_model = nn.Sequential(*list(base_model.children())[:-2])
-
-mean = [0.485, 0.456, 0.406]
-std = [0.229, 0.224, 0.225]
-
-composed = transforms.Compose([transforms.Resize(DEFAULT_IMAGE_SIZE),
-                               transforms.ToTensor(),
-                               transforms.Normalize(mean, std)])
 
 
 class Conv(nn.Module):
@@ -165,15 +163,15 @@ class PredConvNet(nn.Module):
                 PredConv(channel_in[i], loc_channel_out[i], pred_channel_out[i], feature))
 
     def forward(self, x):
-        loc_v = torch.empty(0, 4)
-        conf_v = torch.empty(0, NUM_OF_CLASSES)
+        loc_v = torch.empty(0, 4).to(device)
+        conf_v = torch.empty(0, NUM_OF_CLASSES).to(device)
 
         out_conv = [pred_conv(x) for pred_conv in self.pred_convs]
 
         for loc_out, conf_out in out_conv:
-            print(loc_out.size())
-            loc_v = torch.vstack((loc_v, loc_out.view(-1, 4)))
-            conf_v = torch.vstack((conf_v, conf_out.view(-1, NUM_OF_CLASSES)))
+            loc_v = torch.vstack((loc_v, loc_out.view(-1, 4))).to(device)
+            conf_v = torch.vstack(
+                (conf_v, conf_out.view(-1, NUM_OF_CLASSES))).to(device)
         return loc_v, conf_v
 
 
@@ -197,8 +195,10 @@ class MultiboxLoss(nn.Module):
         n_priors = self.n_priors
         n_classes = self.n_classes
 
-        true_locs = torch.zeros((batch_size, n_priors, 4), dtype=torch.float)
-        true_classes = torch.zeros((batch_size, n_priors), dtype=torch.long)
+        true_locs = torch.zeros((batch_size, n_priors, 4),
+                                dtype=torch.float).to(device)
+        true_classes = torch.zeros(
+            (batch_size, n_priors), dtype=torch.long).to(device)
 
         # For each image
         for i in range(batch_size):
@@ -227,9 +227,16 @@ class MultiboxLoss(nn.Module):
                 boxes[i][object_for_each_prior]), self.priors)
 
         positive_priors = true_classes != 0
+        predicted_locs_pos = predicted_locs[positive_priors]
+        true_locs_pos = true_locs[positive_priors]
 
-        loc_loss = self.smooth_l1(
-            predicted_locs[positive_priors], true_locs[positive_priors])
+        nan_mask1 = predicted_locs_pos != predicted_locs_pos
+        nan_mask2 = true_locs_pos != true_locs_pos
+
+        predicted_locs_pos[nan_mask1] = 0
+        true_locs_pos[nan_mask2] = 0
+
+        loc_loss = self.smooth_l1(predicted_locs_pos, true_locs_pos)
 
         n_positives = positive_priors.sum(dim=1)
         n_hard_negatives = 3 * n_positives
@@ -247,13 +254,12 @@ class MultiboxLoss(nn.Module):
 
         conf_loss_neg, _ = conf_loss_neg.sort(dim=1, descending=True)
         hardness_ranks = torch.LongTensor(range(n_priors)).unsqueeze(
-            0).expand_as(conf_loss_neg)
+            0).expand_as(conf_loss_neg).to(device)
         hard_negatives = hardness_ranks < n_hard_negatives.unsqueeze(1)
         conf_loss_hard_neg = conf_loss_neg[hard_negatives]
 
         conf_loss = (conf_loss_hard_neg.sum() + conf_loss_pos.sum()
                      ) / n_positives.sum().float()
-
         return conf_loss + self.alpha * loc_loss
 
 

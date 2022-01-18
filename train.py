@@ -11,21 +11,23 @@ def train(model: PredConvNet, train_loader, validation_loader, optimizer, criter
     total_accuracy = []
 
     model.to(device)
-    b_size = train_loader.batch_size
 
     for epoch in range(epochs):
         batch_loss = 0
+        it = 0
         for images, bboxes, labels in train_loader:
-
+            it += 1
             optimizer.zero_grad()
             loc_hat, conf_hat = model(images)
 
-            loc_hat = loc_hat.view(b_size, TOTAL_PRIORS_NUM, -1)
-            conf_hat = conf_hat.view(b_size, TOTAL_PRIORS_NUM, -1)
+            loc_hat = loc_hat.view(len(bboxes), TOTAL_PRIORS_NUM, -1)
+            conf_hat = conf_hat.view(len(bboxes), TOTAL_PRIORS_NUM, -1)
 
             loss = criterion(loc_hat, conf_hat, bboxes, labels)
 
-            print("loss: ", loss.item())
+            if it % 250 == 1:
+                print("loss: ", loss.item())
+
             batch_loss += loss.item()
             loss.backward()
             optimizer.step()
@@ -36,8 +38,9 @@ def train(model: PredConvNet, train_loader, validation_loader, optimizer, criter
         for images, bboxes, labels in validation_loader:
             loc_hat, conf_hat = model(images)
 
-            pred_labels_pos = torch.softmax(conf_hat, 1).argmax(1)  # 0 --> 90
-            acc = torch.sum(labels == (pred_labels_pos + 1))
+            pred_labels_pos = torch.softmax(
+                conf_hat, 1).argmax(1) + 1  # 0 --> 90
+            acc = torch.sum(torch.cat(labels) == pred_labels_pos)
             val_acc += acc
 
         total_accuracy.append(
@@ -46,6 +49,8 @@ def train(model: PredConvNet, train_loader, validation_loader, optimizer, criter
         print(
             f"Epoch {epoch} : loss = {total_loss[-1]} - validation accuracy = {total_accuracy[-1]}"
         )
+
+    total_loss, total_accuracy
 
 
 def get_items(y, item):

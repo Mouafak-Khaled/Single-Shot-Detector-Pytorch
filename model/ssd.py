@@ -1,12 +1,14 @@
 import enum
+from tkinter import BOTTOM
 import torch
 import torch.nn as nn
 import torchvision
 from torchvision import transforms, models
 from torch import relu
+import numpy as np
 
 DEFAULT_IMAGE_SIZE = 300
-
+NUM_OF_CLASSES = 91
 
 # A pretrained model trained with ImageNet:
 base_model = models.resnet18(pretrained=True)
@@ -130,46 +132,140 @@ class PredConvNet(nn.Module):
     def __init__(self, channel_in, loc_channel_out, pred_channel_out, features):
         super(PredConvNet, self).__init__()
 
-        self.pred_convs = []
+        self.pred_convs = nn.ModuleList()
+
         for i in range(len(features)):
             self.pred_convs.append(PredConv(
                 channel_in[i], loc_channel_out[i], pred_channel_out[i], features[i]))
 
     def forward(self, x):
+        loc_v = torch.empty(0, 4)
+        conf_v = torch.empty(0, NUM_OF_CLASSES)
+
         out_conv = [pred_conv(x) for pred_conv in self.pred_convs]
-        return out_conv
 
-# loss = nn.CrossEntropyLoss(conf)
-# loss.item()
+        for loc_out, conf_out in out_conv:
+            loc_v = torch.vstack((loc_v, loc_out.view(-1, 4)))
+            conf_v = torch.vstack((conf_v, conf_out.view(-1, NUM_OF_CLASSES)))
+        return loc_v, conf_v
 
-# loss2 = nn.Smooth(loc)
-# loss2.item()
 
-# general_loss = loss + loss2
+class MultiboxLoss(nn.Module):
+    def __init__(self, threshold=0.5, alpha=1):
+        super(MultiboxLoss, self).__init__()
 
-# general_loss.backward()
+        self.smooth_l1 = nn.SmoothL1Loss()  # For bboxes
+        self.cross_entropy = nn.CrossEntropyLoss()  # For confs
+        self.alpha = alpha
 
-# optimizer.step()
+        self.threshold = threshold
+
+    def forward(self, gt_locs, pred_locs, gt_ids, pred_confs):
+        # --- Localization loss: -----------------------------------------------------
+
+        LEFT, TOP, W, H = pred_locs[:, 0], pred_locs[:,
+                                                     1], pred_locs[:, 2], pred_locs[:, 3]
+        BOTTOM = LEFT + W
+        RIGHT = TOP + H
+
+        intersection = torch.empty((pred_locs.size()[0], 0))
+
+        for gt_loc in gt_locs:
+
+            gt_left, gt_top, w, h = gt_loc
+            gt_right = gt_top + h
+            gt_bottom = gt_left + w
+
+            x_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(
+                RIGHT, gt_right) - torch.maximum(LEFT, gt_left))
+            y_overlap = torch.maximum(torch.tensor([0.0]), torch.minimum(
+                BOTTOM, gt_bottom) - torch.maximum(TOP, gt_top))
+            intersection_area = x_overlap * y_overlap
+
+            intersection = torch.hstack(
+                (intersection, intersection_area.reshape(-1, 1)))
+
+        intersection_mask = intersection > self.threshold
+        positives_mask = torch.any(intersection_mask, dim=1)
+
+        positives = torch.sum(positives_mask)
+
+        num_positives = positives.item()
+
+        intersection = intersection * intersection_mask
+        intersection_indecies = intersection.argmax(1)
+
+        positive_preds = pred_locs[positives_mask]
+
+        positive_gts = gt_locs[intersection_indecies][positives_mask]
+
+        positive_grads = torch.empty(positive_preds.size())
+
+        positive_grads[:, 0] = (positive_gts[:, 0] -
+                                positive_preds[:, 0]) / positive_preds[:, 2]
+        positive_grads[:, 1] = (positive_gts[:, 1] -
+                                positive_preds[:, 1]) / positive_preds[:, 3]
+        positive_grads[:, 2] = torch.log(
+            positive_gts[:, 2] / positive_preds[:, 2])
+        positive_grads[:, 3] = torch.log(
+            positive_gts[:, 3] / positive_preds[:, 3])
+
+        loss_loc = self.smooth_l1(positive_grads, positive_gts) / num_positives
+
+        # --- Confidence loss: -----------------------------------------------------
+        # scores of positive priors
+        positive_confs = pred_confs[positives_mask]
+        positive_gt_ids = gt_ids[positives_mask]
+
+        # scores of (some) negative priors
+        num_hard_negatives = 3 * num_positives
+
+        intersection_sums = torch.sum(intersection, 1)
+
+        negative_threshold = torch.sort(intersection_sums)[:num_hard_negatives]
+
+        intersection_sums_mask = intersection_sums <= negative_threshold[0]
+
+        negative_confs = pred_confs[intersection_sums_mask][:num_hard_negatives]
+
+        negative_gt_ids = gt_ids[intersection_sums_mask][:num_hard_negatives]
+
+        loss_conf = self.cross_entropy(positive_confs, positive_gt_ids) + \
+            self.cross_entropy(negative_confs, negative_gt_ids)
+
+        loss_val = loss_conf + self.alpha * loss_loc
+
+        return loss_val
 
 
 def main():
 
-    channels_in = [128, 256, 512, 256, 256, 256]
+    # channels_in = [128, 256, 512, 256, 256, 256]
 
-    priors = [4, 7, 6, 7, 4, 4]
+    # priors = [4, 7, 6, 7, 5, 5]
 
-    NUM_OF_CLASSES = 91
+    # loc_channel_out = [4 * prior for prior in priors]
+    # pred_channel_out = [NUM_OF_CLASSES * prior for prior in priors]
 
-    loc_channel_out = [4 * prior for prior in priors]
-    pred_channel_out = [NUM_OF_CLASSES * prior for prior in priors]
+    # feature_net = FeatureNet(base_model)
 
-    feature_net = FeatureNet(base_model)
+    # x = torch.randn((1, 3, 300, 300))
 
-    x = torch.randn((1, 3, 300, 300))
-    # out = feature_net(x)
+    # pred_convnet = PredConvNet(
+    #     channels_in, loc_channel_out, pred_channel_out, feature_net.features)
 
-    pred_convnet = PredConvNet(
-        channels_in, loc_channel_out, pred_channel_out, feature_net.features)
+    # i, j =  pred_convnet(x)
+    # print(j.size())
+
+    gt_locs = np.abs(np.random.random((5, 4)))
+    pred_locs = np.abs(np.random.random((25, 4)))
+
+    gt_ids = torch.tensor([11, 3231, 753, 423, 847])
+
+    pred_locs = torch.from_numpy(pred_locs)
+    gt_locs = torch.from_numpy(gt_locs)
+
+    pred_confs = torch.randn((25, 5))
 
 
 if __name__ == "__main__":

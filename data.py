@@ -89,7 +89,7 @@ class CocoData(Dataset):
             labels.append(b[2])
 
         images = torch.stack(images, dim=0)
-        
+
         return images, bboxes, labels
 
 

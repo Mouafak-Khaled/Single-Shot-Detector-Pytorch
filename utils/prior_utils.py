@@ -38,24 +38,9 @@ class Rectangle():
 
         return iou
 
-# def main():
-#     x1, y1, w1, h1 = 0, 0, 5, 5
-#     x2, y2, w2, h2 = 2, 2, 1, 1
-
-#     rect_1 = Rectangle(x1, y1, w1, h1)
-#     rect_2 = Rectangle(x2, y2, w2, h2)
-
-#     intersection_amount = rect_1.intersection(rect_2)
-
-#     print(intersection_amount)
-#     print(rect_1.intersection_of_union(rect_2))
-
-
-# if __name__ == "__main__":
-#     main()
-
-
 ##################### The below code is incorperated https://github.com/sgrvinod #####################
+
+
 def gcxgcy_to_cxcy(gcxgcy, priors_cxcy):
     return torch.cat([gcxgcy[:, :2] * priors_cxcy[:, 2:] / 10 + priors_cxcy[:, :2],
                       torch.exp(gcxgcy[:, 2:] / 5) * priors_cxcy[:, 2:]], 1)

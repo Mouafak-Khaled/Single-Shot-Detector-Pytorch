@@ -66,11 +66,15 @@ class CocoData(Dataset):
         size = transforms.ToTensor()(image).size()
         if self.transform is not None:
             image, targets = self.transform(image, targets, self.labels)
+        
         if len(targets) == 0:
             return self.__getitem__(index + 1)
 
         bboxes = self.get_items(targets, 'bbox')
         labels = self.get_items(targets, 'category_id')
+        
+        if len(labels.size()) == 0:
+            return self.__getitem__(index + 1)
 
         return image, bboxes, labels
 

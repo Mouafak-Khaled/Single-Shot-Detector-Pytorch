@@ -41,15 +41,23 @@ class Conv(nn.Module):
         self.bn1 = nn.BatchNorm2d(channels[1])
         self.bn2 = nn.BatchNorm2d(channels[2])
 
-        torch.nn.init.xavier_uniform_(self.conv1.weight)
-        torch.nn.init.xavier_uniform_(self.conv2.weight)
+        torch.nn.init.kaiming_normal_(self.conv1.weight)
+        torch.nn.init.kaiming_normal_(self.conv2.weight)
+
+        self.relu1 = nn.ReLU()
+        self.relu2 = nn.ReLU()
 
         nn.init.constant_(self.conv1.bias, 0.)
         nn.init.constant_(self.conv2.bias, 0.)
 
+        self.dropout = nn.Dropout(p=0.5)
+
     def forward(self, x):
-        x = self.bn1(relu(self.conv1(x)))
-        x = self.bn2(relu(self.conv2(x)))
+
+        x = self.relu1(self.bn1(self.conv1(x)))
+        x = self.relu2(self.bn2(self.conv2(x)))
+
+#         self.dropout(x)
 
         return x
 
@@ -145,7 +153,9 @@ class PredConv(nn.Module):
         nn.init.constant_(self.pred_conv.bias, 0.)
 
     def forward(self, x):
+
         x1 = self.feature(x)
+
         x_loc = self.loc_conv(x1)
         x_pred = self.pred_conv(x1)
 
@@ -172,6 +182,15 @@ class PredConvNet(nn.Module):
             loc_v = torch.vstack((loc_v, loc_out.view(-1, 4))).to(device)
             conf_v = torch.vstack(
                 (conf_v, conf_out.view(-1, NUM_OF_CLASSES))).to(device)
+
+        chcek = torch.sum(torch.isnan(loc_v))
+        if chcek:
+            print(f"loc_v got: {chcek} nans")
+
+        chcek = torch.sum(torch.isnan(conf_v))
+        if chcek:
+            print(f"conf_v got: {chcek} nans")
+
         return loc_v, conf_v
 
 
@@ -184,7 +203,9 @@ class MultiboxLoss(nn.Module):
         self.alpha = alpha
         self.n_priors = n_priors
         self.n_classes = n_classes
+        print("crearing priors")
         self.priors = create_priors()
+        print("cxcy to xy")
         self.priors_xy = cxcy_to_xy(self.priors)
 
         self.threshold = threshold
@@ -258,40 +279,11 @@ class MultiboxLoss(nn.Module):
         hard_negatives = hardness_ranks < n_hard_negatives.unsqueeze(1)
         conf_loss_hard_neg = conf_loss_neg[hard_negatives]
 
-        conf_loss = (conf_loss_hard_neg.sum() + conf_loss_pos.sum()
-                     ) / n_positives.sum().float()
-        return conf_loss + self.alpha * loc_loss
+        conf_loss = (conf_loss_hard_neg.sum() + conf_loss_pos.sum())
 
+        import math
+        if math.isinf(loc_loss):
+            loc_loss = 0
+#             print(loc_loss)
 
-def main():
-
-    # channels_in = [128, 256, 512, 256, 256, 256]
-
-    # priors = [4, 7, 6, 7, 5, 5]
-
-    # loc_channel_out = [4 * prior for prior in priors]
-    # pred_channel_out = [NUM_OF_CLASSES * prior for prior in priors]
-
-    # feature_net = FeatureNet(base_model)
-
-    # x = torch.randn((1, 3, 300, 300))
-
-    # pred_convnet = PredConvNet(
-    #     channels_in, loc_channel_out, pred_channel_out, feature_net.features)
-
-    # i, j =  pred_convnet(x)
-    # print(j.size())
-
-    gt_locs = np.abs(np.random.random((5, 4)))
-    pred_locs = np.abs(np.random.random((25, 4)))
-
-    gt_ids = torch.tensor([11, 3231, 753, 423, 847])
-
-    pred_locs = torch.from_numpy(pred_locs)
-    gt_locs = torch.from_numpy(gt_locs)
-
-    pred_confs = torch.randn((25, 5))
-
-
-if __name__ == "__main__":
-    main()
+        return (conf_loss + self.alpha * loc_loss) / n_positives.sum().float()
